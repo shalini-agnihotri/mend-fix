@@ -1,0 +1,113 @@
+name: Mend vulnerability fix
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+# Serialize runs so two concurrent fix attempts don't collide on branch names or git state.
+concurrency:
+  group: mend-fix
+  cancel-in-progress: false
+
+jobs:
+  mend-fix:
+    if: |
+      (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'mend-fix')) ||
+      (github.event.action == 'labeled' && github.event.label.name == 'mend-fix')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Parse issue form fields
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+
+          get_field() {
+            local label="$1"
+            local value
+            value=$(printf '%s' "$ISSUE_BODY" | awk -v label="### $label" '
+              $0 == label { found = 1; next }
+              found && /^### / { exit }
+              found && NF { print; exit }
+            ')
+            value=$(printf '%s' "$value" | tr -d '\r')
+            [ "$value" = "_No response_" ] && value=""
+            printf '%s' "$value"
+          }
+
+          jira=$(get_field "Jira ticket")
+          scope=$(get_field "Severity scope")
+          overrides=$(get_field "Overrides handling")
+
+          [ -z "$jira" ] && jira="none"
+          [ -z "$scope" ] && scope="all"
+          [ -z "$overrides" ] && overrides="skip"
+
+          case "$scope" in all|critical+high) ;; *) echo "::error::Invalid scope: $scope"; exit 1 ;; esac
+          case "$overrides" in skip|auto) ;; *) echo "::error::Invalid overrides: $overrides"; exit 1 ;; esac
+
+          echo "jira=$jira"           >> "$GITHUB_OUTPUT"
+          echo "scope=$scope"         >> "$GITHUB_OUTPUT"
+          echo "overrides=$overrides" >> "$GITHUB_OUTPUT"
+          echo "Parsed inputs: jira=$jira scope=$scope overrides=$overrides"
+
+      - name: Write Mend credentials file
+        env:
+          MEND_ORG_TOKEN: ${{ secrets.MEND_ORG_TOKEN }}
+          MEND_USER_KEY: ${{ secrets.MEND_USER_KEY }}
+          MEND_API_URL: ${{ secrets.MEND_API_URL }}
+          MEND_PRODUCT_TOKEN: ${{ secrets.MEND_PRODUCT_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.mend
+          umask 077
+          cat > ~/.mend/credentials <<EOF
+          [saas-eu]
+          org_token = ${MEND_ORG_TOKEN}
+          user_key = ${MEND_USER_KEY}
+          api_url = ${MEND_API_URL}
+          product_token = ${MEND_PRODUCT_TOKEN}
+          EOF
+
+      - name: Run Claude /mend skill
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: "/mend --jira=${{ steps.parse.outputs.jira }} --scope=${{ steps.parse.outputs.scope }} --overrides=${{ steps.parse.outputs.overrides }}"
+          claude_args: "--max-turns 60"
+
+      - name: Comment on issue with run result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${{ job.status }}" = "success" ]; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Mend fix run completed. See the draft PR opened by this run, or the [workflow log]($RUN_URL) for details."
+            gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed
+          else
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Mend fix workflow failed. Check the [workflow log]($RUN_URL) — the issue is left open so you can fix and re-apply the \`mend-fix\` label to retry."
+          fi

@@ -1,0 +1,54 @@
+name: Mend vulnerability fix
+description: Run Claude on the latest Mend alerts and open a draft PR with the fixes
+title: "[mend-fix] "
+labels: ["mend-fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Submitting this issue triggers `.github/workflows/mend-fix.yaml`. Claude will:
+        1. Create a fresh branch off `main`
+        2. Fetch the current Mend alerts for this repo
+        3. Apply dep upgrades (and optionally `overrides`) for the chosen severity scope
+        4. Run build + tests
+        5. Open a **draft PR** for you to review
+
+        The whole run takes ~5–15 min depending on how many CVEs need fixing. Watch the workflow run for live status.
+
+  - type: input
+    id: jira
+    attributes:
+      label: Jira ticket
+      description: |
+        Used in the branch name (e.g. `<username>/mend-vulnerabilities/MOB-12345`).
+        Leave blank if there is no ticket — branch will be `<username>/mend-vulnerabilities`.
+      placeholder: MOB-12345
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Severity scope
+      description: Which CVEs should Claude attempt to fix?
+      options:
+        - all
+        - critical+high
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: overrides
+    attributes:
+      label: Overrides handling
+      description: |
+        How should Claude handle transitive CVEs that no parent upgrade can resolve?
+        - **skip** (recommended): leave them unfixed and list them in the PR body for manual review. Safer — won't force a sibling break.
+        - **auto**: add an `overrides` entry automatically. Faster, but may break sibling consumers of the affected package.
+      options:
+        - skip
+        - auto
+      default: 0
+    validations:
+      required: true
