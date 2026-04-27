@@ -94,7 +94,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: "/mend --jira=${{ steps.parse.outputs.jira }} --scope=${{ steps.parse.outputs.scope }} --overrides=${{ steps.parse.outputs.overrides }}"
-          claude_args: "--max-turns 60 --permission-mode bypassPermissions"
+          claude_args: "--max-turns 60"
 
       - name: Fail if Claude hit permission denials
         run: |
