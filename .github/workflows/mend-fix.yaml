@@ -95,6 +95,14 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: "/mend --jira=${{ steps.parse.outputs.jira }} --scope=${{ steps.parse.outputs.scope }} --overrides=${{ steps.parse.outputs.overrides }}"
           claude_args: "--max-turns 60"
+          settings: |
+            {
+              "permissions": {
+                "defaultMode": "bypassPermissions",
+                "allow": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+              }
+            }
+          show_full_output: true
 
       - name: Fail if Claude hit permission denials
         run: |
