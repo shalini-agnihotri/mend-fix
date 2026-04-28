@@ -43,9 +43,7 @@ jobs:
         run: npm install --no-save --no-package-lock @anthropic-ai/claude-agent-sdk@^0.2.120
 
       - name: Install Claude Code CLI
-        run: |
-          curl -fsSL https://claude.ai/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        run: npm install -g @anthropic-ai/claude-code
 
       - name: Write Mend credentials file
         env:
