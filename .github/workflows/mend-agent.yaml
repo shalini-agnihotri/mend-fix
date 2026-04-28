@@ -51,6 +51,7 @@ jobs:
           MEND_USER_KEY:      ${{ secrets.MEND_USER_KEY }}
           MEND_API_URL:       ${{ secrets.MEND_API_URL }}
           MEND_PRODUCT_TOKEN: ${{ secrets.MEND_PRODUCT_TOKEN }}
+          MEND_PROJECT_TOKEN: ${{ secrets.MEND_PROJECT_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p ~/.mend
@@ -61,6 +62,7 @@ jobs:
           user_key = ${MEND_USER_KEY}
           api_url = ${MEND_API_URL}
           product_token = ${MEND_PRODUCT_TOKEN}
+          project_token = ${MEND_PROJECT_TOKEN}
           EOF
 
       - name: Configure git identity

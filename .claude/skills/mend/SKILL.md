@@ -59,9 +59,15 @@ c = configparser.RawConfigParser()
 c.read(os.path.expanduser('~/.mend/credentials'))
 print(c['saas-eu']['product_token'])
 ")
+PROJECT_TOKEN=$(python3 -c "
+import configparser, os
+c = configparser.RawConfigParser()
+c.read(os.path.expanduser('~/.mend/credentials'))
+print(c['saas-eu'].get('project_token', ''))
+")
 ```
 
-If any variable is empty, stop and tell the user to populate `~/.mend/credentials`. The file must have a `[saas-eu]` section with `org_token`, `user_key`, `api_url`, and `product_token`. These can be found in the Mend web UI at **Integrate → Organization → API Key** and **Profile → User Keys**.
+If any variable is empty, stop and tell the user to populate `~/.mend/credentials`. The file must have a `[saas-eu]` section with `org_token`, `user_key`, `api_url`, `product_token`, and `project_token`. These can be found in the Mend web UI at **Integrate → Organization → API Key**, **Profile → User Keys**, and **Project → Project Vitals → Request Token** (for `project_token`).
 
 ## Step 1 — Create a branch from main
 
@@ -86,7 +92,7 @@ export TMPFILE=$(python3 -c "import tempfile, os; print(os.path.join(tempfile.ge
 
 curl -s -X POST "$API_URL" \
   -H "Content-Type: application/json" \
-  -d "{\"requestType\": \"getProductAlertsByType\", \"userKey\": \"$USER_KEY\", \"orgToken\": \"$ORG_TOKEN\", \"productToken\": \"$PRODUCT_TOKEN\", \"alertType\": \"SECURITY_VULNERABILITY\"}" \
+  -d "{\"requestType\": \"getProjectAlertsByType\", \"userKey\": \"$USER_KEY\", \"orgToken\": \"$ORG_TOKEN\", \"projectToken\": \"$PROJECT_TOKEN\", \"alertType\": \"SECURITY_VULNERABILITY\"}" \
   -o "$TMPFILE"
 ```
 
@@ -96,8 +102,16 @@ curl -s -X POST "$API_URL" \
 
 The API returns `"high"` for both critical and high. Derive critical from CVSS score >= 9.0.
 
+The Mend `productToken` covers **every project** under that product (active, archived, snapshots, branch clones), so the API response includes alerts from sibling projects you do not want to fix here. Match the active project name **exactly** — substring matching lets stale siblings like `scriptless-mobile-backend-old` or `scriptless-mobile-backend-staging` leak in and produces phantom "vulnerabilities" that are not visible in the UI for the active project.
+
+The active project name is `GH_scriptless-mobile-backend` (visible in the Mend UI breadcrumb under Products → `Perfecto_GHC` → Projects → `GH_scriptless-mobile-backend`). If that name ever changes, update the constant below.
+
+> Note: once a `MEND_PROJECT_TOKEN` GitHub secret is available, switch the Step 2 API call to use `"projectToken": "$PROJECT_TOKEN"` instead of `"productToken": "$PRODUCT_TOKEN"`. Mend will then return only this project's alerts and the client-side filter becomes a redundant safety net (keep it anyway — defensive).
+
 ```python
 import json, os, sys
+
+ACTIVE_PROJECT = 'GH_scriptless-mobile-backend'   # exact match, not substring
 
 tmpfile = os.environ.get('TMPFILE')
 if not tmpfile:
@@ -106,8 +120,19 @@ if not tmpfile:
 with open(tmpfile, encoding='utf-8') as f:
     alerts = json.load(f).get('alerts', [])
 
-# Filter to this repo's project only
-alerts = [a for a in alerts if 'scriptless-mobile-backend' in a.get('project', '')]
+# Diagnostic: print the project breakdown so a stale sibling leaking through is obvious
+project_counts = {}
+for a in alerts:
+    p = a.get('project', '')
+    project_counts[p] = project_counts.get(p, 0) + 1
+print('Alert counts by project (raw API response):', file=sys.stderr)
+for p, n in sorted(project_counts.items()):
+    marker = '  <-- active' if p == ACTIVE_PROJECT else ''
+    print(f'  {n:4d}  {p}{marker}', file=sys.stderr)
+
+# Scope strictly to the active project — exact match, no substring
+alerts = [a for a in alerts if a.get('project', '') == ACTIVE_PROJECT]
+print(f'Filtered to {len(alerts)} alerts for project {ACTIVE_PROJECT!r}', file=sys.stderr)
 
 rows = []
 for a in alerts:
