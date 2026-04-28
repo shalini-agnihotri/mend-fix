@@ -1,0 +1,84 @@
+name: Mend agent (scheduled)
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      jira:
+        description: 'Jira ticket ID (or "none")'
+        default: 'none'
+      scope:
+        description: 'Severity scope: all | critical+high'
+        default: 'all'
+      overrides:
+        description: 'Overrides handling: skip | auto'
+        default: 'skip'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: mend-agent
+  cancel-in-progress: false
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Agent SDK
+        run: npm install --no-save --no-package-lock @anthropic-ai/claude-agent-sdk@^0.2.120
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Write Mend credentials file
+        env:
+          MEND_ORG_TOKEN:     ${{ secrets.MEND_ORG_TOKEN }}
+          MEND_USER_KEY:      ${{ secrets.MEND_USER_KEY }}
+          MEND_API_URL:       ${{ secrets.MEND_API_URL }}
+          MEND_PRODUCT_TOKEN: ${{ secrets.MEND_PRODUCT_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.mend
+          umask 077
+          cat > ~/.mend/credentials <<EOF
+          [saas-eu]
+          org_token = ${MEND_ORG_TOKEN}
+          user_key = ${MEND_USER_KEY}
+          api_url = ${MEND_API_URL}
+          product_token = ${MEND_PRODUCT_TOKEN}
+          EOF
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name  "claude[bot]"
+          git config --global user.email "claude[bot]@users.noreply.github.com"
+
+      - name: Run mend agent
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN:                ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jira="${{ github.event.inputs.jira     || 'none' }}"
+          scope="${{ github.event.inputs.scope     || 'all'  }}"
+          overrides="${{ github.event.inputs.overrides || 'skip' }}"
+          node scripts/mend-agent.mjs \
+            --jira="$jira" \
+            --scope="$scope" \
+            --overrides="$overrides"
