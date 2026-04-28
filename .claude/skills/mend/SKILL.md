@@ -298,6 +298,41 @@ Verify the patched versions are installed:
 npm ls <package-name>
 ```
 
+### Adapt call sites to breaking API changes (major version bumps)
+
+After a **major** version bump (`x.y.z` → `(x+1).0.0`), the new release often changes the package's public surface. Check these proactively **before** Step 7 — proactive rewrites are cheaper than failure-driven diagnosis, and they keep tests honest (a test passing because nothing imports the bumped code is not a green light).
+
+#### 1. Import shape changes (default vs named export)
+
+Major bumps frequently drop or reshape default exports. Examples:
+- `uuid` v3 → v7+: `import uuid from 'uuid'` becomes `import { v4 } from 'uuid'`.
+- `chalk` v4 → v5: default-exported function becomes a named-exports module.
+- `node-fetch` v2 → v3: CJS default becomes ESM named exports.
+
+For every major-bumped package, find every import in the codebase:
+
+```bash
+git grep -nE "(from|require\\()[ ]*['\"]<pkg>['\"]" -- ':!node_modules' ':!package-lock.json'
+```
+
+Cross-check each match against the new release's exports — read `node_modules/<pkg>/package.json` (`exports` field) and the package's `*.d.ts` or migration guide. **Do not guess the shape; read it.** Rewrite imports to match.
+
+#### 2. API signature changes (arity, positional → named, sync → async)
+
+A function may keep its name but change its parameter list — `func(a, b, c)` becomes `func(a, b)` or `func(a, { b, c })`. The TypeScript compiler is the cheapest way to find every mismatched call site at once:
+
+```bash
+npx tsc --noEmit
+```
+
+For each error, look at the new signature in `node_modules/<pkg>/**/*.d.ts` (or the migration guide) and update the call site. Patterns to watch for:
+- Positional args collapsed into an options bag: `fn(a, b, c)` → `fn(a, { b, c })`.
+- Callback replaced by a Promise: `fn(arg, cb)` → `const result = await fn(arg)`.
+- A required arg became optional, or vice versa.
+- The return shape changed (e.g. an array became an object with `data`/`meta` fields).
+
+Only escalate to "not fixable (breaking change)" if the new signature requires real logic rewrite — the function was split into two, the return type ripples through many call sites with different semantics, etc. Mechanical updates (renamed import, reordered args, awaited Promise) are part of the fix; they should be applied silently and noted in the PR body, not used as a reason to revert the bump.
+
 ## Step 7 — Build and test
 
 Both must pass before staging changes.
