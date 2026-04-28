@@ -270,17 +270,17 @@ Workflow for each transitive CVE:
 
    Use `"npm:empty-npm-package@1.0.0"` only when certain the package is not used at runtime (build-time dev tooling only).
 
-### Sync the patched version across every `package.json` in the monorepo
+### Sync the patched version across every `package.json` (and template) in the monorepo
 
-Root drives `package-lock.json`, but individual `libs/*/package.json` files declare their own runtime deps and will drift out of sync unless they are updated too. After every root bump (or lib bump, for the no-root-entry case above), align every other declaration of the same package to the **same range used in root**.
+Root drives `package-lock.json`, but individual `libs/*/package.json`, `apps/**/package.json`, and **`package.json.ejs` templates** (which are rendered into real `package.json` files at script-generation time) declare their own runtime deps and will drift out of sync unless they are updated too. After every root bump (or lib bump, for the no-root-entry case above), align every other declaration of the same package to the **same range used in root**.
 
-Run this for each package that was bumped:
+Find every declaration recursively — do not use a single-level glob like `apps/*/package.json`, since it will miss nested files such as `apps/script-generator/src/assets/templates/package.json.ejs`. Use `git ls-files` so `node_modules` is excluded automatically:
 
 ```bash
-grep -l '"<package-name>"' apps/*/package.json libs/*/package.json 2>/dev/null
+git ls-files '*package.json' '*package.json.ejs' | xargs grep -l '"<package-name>"' 2>/dev/null
 ```
 
-For each match, edit the range to match root. Skip `@perfectomobiledev/*` and `@perforce-perfecto/*` entries — those are workspace-internal pins (`0.0.1`) that track the monorepo's own versioning, not npm versions.
+For each match, edit the range to match root — including the `.ejs` template files (they are valid JSON with EJS expressions; only edit the `"<package>": "<range>"` line, leave EJS tags untouched). Skip `@perfectomobiledev/*` and `@perforce-perfecto/*` entries — those are workspace-internal pins (`0.0.1`) that track the monorepo's own versioning, not npm versions.
 
 If you added an `overrides` entry in root, also add the same entry to any lib that declares the affected package, so the lib's local view matches the resolved tree.
 
@@ -311,6 +311,32 @@ npx nx run-many -t test
 ```
 
 If a build or test fails, diagnose the root cause before proceeding. A failing test may indicate a breaking change in the upgraded package — revert that specific fix and mark it as "not fixable (breaking change)" in the summary.
+
+### ESM-only upgrades (Jest `SyntaxError: Cannot use import statement outside a module`)
+
+Many major bumps in 2024+ ship ESM-only releases (e.g. `uuid` v14, `node-fetch` v3, `chalk` v5). Jest in CJS mode chokes on them with `SyntaxError: Cannot use import statement outside a module` or `SyntaxError: Unexpected token 'export'` originating in `node_modules/<package>/...`. **This is not a breaking change — do not revert the bump.** Instead, add the package to `transformIgnorePatterns` in `jest.preset.js` so Jest transforms it through Babel:
+
+```js
+// jest.preset.js — before
+module.exports = {
+  ...nxPreset,
+  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')]
+};
+
+// jest.preset.js — after (uuid added to the not-ignored list)
+module.exports = {
+  ...nxPreset,
+  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')],
+  transformIgnorePatterns: [
+    ...(nxPreset.transformIgnorePatterns || []),
+    'node_modules/(?!(uuid)/)'
+  ]
+};
+```
+
+If `transformIgnorePatterns` already exists with another package (e.g. `'node_modules/(?!(node-fetch)/)'`), extend the alternation rather than replacing it: `'node_modules/(?!(node-fetch|uuid)/)'`.
+
+Re-run `npx nx run-many -t test` to confirm. Only revert the bump and mark "not fixable" if tests still fail after the Jest config fix — that would indicate a real API breaking change, not an ESM-loader issue.
 
 ## Step 8 — Stage all changes (and, in auto mode, open a draft PR)
 
