@@ -358,6 +358,18 @@ For each error, look at the new signature in `node_modules/<pkg>/**/*.d.ts` (or 
 
 Only escalate to "not fixable (breaking change)" if the new signature requires real logic rewrite — the function was split into two, the return type ripples through many call sites with different semantics, etc. Mechanical updates (renamed import, reordered args, awaited Promise) are part of the fix; they should be applied silently and noted in the PR body, not used as a reason to revert the bump.
 
+#### Reconcile `package-lock.json` if this step changed any `package.json`
+
+The earlier `npm install` (under "Regenerate package-lock.json") had to run before this step so `node_modules` and `*.d.ts` were available for `tsc` and `git grep`. But if the call-site adapt above resulted in **any** edit to `package.json` — most commonly a revert/downgrade of a bump that turned out to need real logic rewrite, or adding a shim/polyfill dependency — the lock file is now stale and Step 7 will build/test against an inconsistent dep tree.
+
+Run `git diff --name-only` and check if any `package.json` (root, libs, apps, or `.ejs` templates) appears in the output **after** call-site adapt. If yes, regenerate the lock file once more before Step 7:
+
+```bash
+git diff --name-only | grep -E '(^|/)package\\.json(\\.ejs)?$' && npm install
+```
+
+Skip this if no `package.json` changed during adapt — re-running `npm install` against an unchanged tree is wasted CI time but otherwise harmless.
+
 ## Step 7 — Build and test
 
 Both must pass before staging changes.
