@@ -2,7 +2,7 @@ name: Mend agent (scheduled)
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # 06:00 UTC daily
+    - cron: '31 6 * * *'   # 06:31 UTC daily = 12:01 PM IST
   workflow_dispatch:
     inputs:
       jira:
