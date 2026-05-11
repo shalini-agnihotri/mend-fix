@@ -106,8 +106,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: "/mend --jira=${{ steps.parse.outputs.jira }} --scope=${{ steps.parse.outputs.scope }} --overrides=${{ steps.parse.outputs.overrides }}"
-          settings: '{"permissions": {"defaultMode": "bypassPermissions"}}'
-          claude_args: "--max-turns 60"
+          claude_args: "--max-turns 60 --permission-mode bypassPermissions --allow-dangerously-skip-permissions"
 
       - name: Build Slack completion message
         id: slack-msg
