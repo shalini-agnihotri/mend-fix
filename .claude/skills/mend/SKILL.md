@@ -473,6 +473,19 @@ If the Jira flag was a real ticket (not `none`), include it in the PR title: `fi
 
 If `gh pr create` fails with a permissions error ("GitHub Actions is not permitted to create or approve pull requests"), the repo's "Allow Actions to create PRs" setting is off — the workflow needs a `PR_TOKEN` PAT secret. Print the error and exit non-zero so the workflow run fails visibly.
 
+## Pitfalls and lessons learned
+
+Non-obvious gotchas the skill has hit before. Skim this list when something looks wrong mid-run — the fix is probably already documented in the referenced step.
+
+- **Mend API returns `"high"` for both critical and high.** Derive critical from `cvss3_score >= 9.0` — see Step 3.
+- **`productToken` leaks sibling-project alerts** (e.g. `*-old`, `*-staging`). Filter by exact project name `GH_scriptless-mobile-backend`, not substring — see Step 3.
+- **Lib `package.json` drifts from root.** Root drives `package-lock.json`; if a package is only declared in `libs/*`, edits to the lib won't change what's installed. Bump in every lib *and* add to root — see Step 6 ("Direct vulnerabilities").
+- **`.ejs` package templates are easy to miss.** `apps/*/package.json` globs skip nested files like `apps/script-generator/src/assets/templates/package.json.ejs`. Use `git ls-files '*package.json' '*package.json.ejs'` — see Step 6 ("Sync the patched version").
+- **`overrides` can silently break sibling consumers.** Always try a parent upgrade first; only fall back to `overrides` when no parent release resolves the CVE — see Step 6 ("Transitive vulnerabilities").
+- **Jest `SyntaxError: Cannot use import statement outside a module` is *not* a breaking change.** It's an ESM-only release hitting Jest in CJS mode. Add the package to `transformIgnorePatterns` in `jest.preset.js` — see Step 7. Do not revert the bump.
+- **Call-site adapt can re-stale the lock file.** If a major-version adapt edits any `package.json` (revert/downgrade, shim added), re-run `npm install` before Step 7 — see Step 6 ("Reconcile `package-lock.json`").
+- **Always list "not fixed" CVEs in the PR body.** Reviewers need the complete picture, including the ones blocked on upstream — see Step 5 / Step 8.
+
 ## Error handling
 
 | Error                                | Action                                                                                     |
