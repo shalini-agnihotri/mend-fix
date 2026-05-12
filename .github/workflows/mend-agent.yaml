@@ -11,9 +11,6 @@ on:
       scope:
         description: 'Severity scope: all | critical+high'
         default: 'all'
-      overrides:
-        description: 'Overrides handling: skip | auto'
-        default: 'skip'
 
 permissions:
   contents: write
@@ -33,6 +30,18 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+
+      - name: Notify Slack — agent started
+        if: vars.SANITY_TESTING_FAILURE_CHANNEL != ''
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ vars.SANITY_TESTING_FAILURE_CHANNEL }}",
+              "text": "Mend agent (scheduled) started"
+            }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -54,6 +63,18 @@ jobs:
           MEND_PROJECT_TOKEN: ${{ secrets.MEND_PROJECT_TOKEN }}
         run: |
           set -euo pipefail
+
+          missing=()
+          [ -z "${MEND_ORG_TOKEN:-}" ]     && missing+=("MEND_ORG_TOKEN")
+          [ -z "${MEND_USER_KEY:-}" ]      && missing+=("MEND_USER_KEY")
+          [ -z "${MEND_API_URL:-}" ]       && missing+=("MEND_API_URL")
+          [ -z "${MEND_PRODUCT_TOKEN:-}" ] && missing+=("MEND_PRODUCT_TOKEN")
+          [ -z "${MEND_PROJECT_TOKEN:-}" ] && missing+=("MEND_PROJECT_TOKEN")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required Mend secrets: ${missing[*]}"
+            exit 1
+          fi
+
           mkdir -p ~/.mend
           umask 077
           cat > ~/.mend/credentials <<EOF
@@ -71,14 +92,47 @@ jobs:
           git config --global user.email "claude[bot]@users.noreply.github.com"
 
       - name: Run mend agent
+        id: agent
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN:                ${{ secrets.GITHUB_TOKEN }}
         run: |
-          jira="${{ github.event.inputs.jira     || 'none' }}"
-          scope="${{ github.event.inputs.scope     || 'all'  }}"
-          overrides="${{ github.event.inputs.overrides || 'skip' }}"
+          jira="${{ github.event.inputs.jira  || 'none' }}"
+          scope="${{ github.event.inputs.scope || 'all'  }}"
           node scripts/mend-agent.mjs \
             --jira="$jira" \
-            --scope="$scope" \
-            --overrides="$overrides"
+            --scope="$scope"
+
+      - name: Build Slack completion message
+        id: slack-msg
+        if: ${{ !cancelled() && vars.SANITY_TESTING_FAILURE_CHANNEL != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${{ job.status }}" = "success" ]; then
+            PR_URL=$(gh pr list --repo "$REPO" --state open --json url,isDraft,createdAt \
+              --jq '[.[] | select(.isDraft == true)] | sort_by(.createdAt) | reverse | .[0].url' || echo "")
+            if [ -n "$PR_URL" ]; then
+              MSG="Mend agent (scheduled) completed. PR: $PR_URL"
+            else
+              MSG="Mend agent (scheduled) completed. No vulnerabilities required fixing."
+            fi
+          else
+            MSG="Mend agent (scheduled) failed. Workflow run: $RUN_URL"
+          fi
+          echo "text=$MSG" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack — agent completed
+        if: ${{ !cancelled() && vars.SANITY_TESTING_FAILURE_CHANNEL != '' }}
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ vars.SANITY_TESTING_FAILURE_CHANNEL }}",
+              "text": "${{ steps.slack-msg.outputs.text }}"
+            }

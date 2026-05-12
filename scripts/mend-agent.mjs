@@ -2,7 +2,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 const flags = process.argv.slice(2).join(' ').trim()
-  || '--jira=none --scope=all --overrides=skip';
+  || '--jira=none --scope=all';
 
 const result = query({
   prompt: `/mend ${flags}`,

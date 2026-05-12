@@ -11,24 +11,23 @@ You are fixing Mend (WhiteSource) security vulnerabilities for the `scriptless-m
 - **Only pause for the explicit user-input questions called out in the steps below.** Those are:
   1. Step 1 — the Jira ticket ID for the branch name.
   2. Step 5 — whether to fix `all` fixable CVEs or just `critical+high`.
-  3. Step 6 — whether to add an `overrides` entry when no parent upgrade resolves a transitive CVE.
+- Transitive CVEs that no parent upgrade can resolve are fixed automatically by adding an `overrides` entry — **never ask the user**. Each override is recorded in the PR body with the reason it was required and the risk of skipping it (see Step 6 and Step 8).
 - Everything else runs end-to-end autonomously from Step 1 through Step 8.
 
 ## Auto mode (CI / scheduled runs)
 
-When this skill is invoked with arguments of the form `--jira=<value> --scope=<value> --overrides=<value>` (for example, from the GitHub Actions workflow at `.github/workflows/mend-fix.yaml`), it must run **fully unattended** — all three prompts are answered by the flags and the skill must complete by opening a draft PR.
+When this skill is invoked with arguments of the form `--jira=<value> --scope=<value>` (for example, from the scheduled / `workflow_dispatch` GitHub Actions workflow at `.github/workflows/mend-agent.yaml`, which shells out to `scripts/mend-agent.mjs`), it must run **fully unattended** — both prompts are answered by the flags and the skill must complete by opening a draft PR.
 
 Flag values:
 
-| Flag           | Allowed values                | Effect                                                                                                         |
-| -------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--jira`       | `MOB-12345` or `none`         | Used in the branch name. `none` means "no Jira", same as the `no jira` reply in interactive mode.              |
-| `--scope`      | `all` or `critical+high`      | Step 5 — which severities to fix. Skip the user prompt entirely.                                               |
-| `--overrides`  | `skip` or `auto`              | Step 6 — `skip` means never add `overrides` entries; mark those CVEs as "needs manual review" in the PR body. `auto` means add the override with the warning baked into the PR description. Skip the user prompt either way. |
+| Flag      | Allowed values            | Effect                                                                                            |
+| --------- | ------------------------- | ------------------------------------------------------------------------------------------------- |
+| `--jira`  | `MOB-12345` or `none`     | Used in the branch name. `none` means "no Jira", same as the `no jira` reply in interactive mode. |
+| `--scope` | `all` or `critical+high`  | Step 5 — which severities to fix. Skip the user prompt entirely.                                  |
 
 In auto mode, **Step 8 changes**: instead of stopping after `git add`, the skill must commit the staged changes and run `gh pr create --draft` with the CVE summary as the PR body. See Step 8 for the auto-mode block.
 
-If any of the three flags is missing while at least one is present, treat it as a malformed invocation: stop and print the expected flag set. Do not fall back to interactive prompts in CI — they will hang the workflow.
+If either flag is missing while the other is present, treat it as a malformed invocation: stop and print the expected flag set. Do not fall back to interactive prompts in CI — they will hang the workflow.
 
 ## Credentials
 
@@ -109,7 +108,7 @@ The active project name is `GH_scriptless-mobile-backend` (visible in the Mend U
 > Note: once a `MEND_PROJECT_TOKEN` GitHub secret is available, switch the Step 2 API call to use `"projectToken": "$PROJECT_TOKEN"` instead of `"productToken": "$PRODUCT_TOKEN"`. Mend will then return only this project's alerts and the client-side filter becomes a redundant safety net (keep it anyway — defensive).
 
 ```python
-import json, os, sys
+import json, os, re, sys
 
 ACTIVE_PROJECT = 'GH_scriptless-mobile-backend'   # exact match, not substring
 
@@ -142,8 +141,11 @@ for a in alerts:
     cvss = v.get('cvss3_score', 0)
     if sev == 'high' and cvss >= 9.0:
         sev = 'critical'
-    pkg = lib.get('filename', '').replace('.tgz', '')
-    # Strip version suffix from filename to get package name (e.g. lodash-4.17.20 → lodash)
+    # Fallback only — `lib.get('name')` below is the canonical package name.
+    # `filename` looks like `lodash-4.17.20.tgz`; strip `.tgz` and the trailing
+    # `-<version>` so the fallback is `lodash`, not `lodash-4.17.20`.
+    pkg = re.sub(r'-\d+(?:\.\d+)*(?:[-+][^-+]+)?$', '',
+                 lib.get('filename', '').replace('.tgz', ''))
     rows.append({
         'cve':      v.get('name', ''),
         'severity': sev,
@@ -242,8 +244,10 @@ Do this for every sub-step below (delete lock file, each package bump, each over
 ### Before making any changes, delete package-lock.json
 
 ```bash
-rm package-lock.json
+rm -f package-lock.json
 ```
+
+`-f` keeps the step idempotent — re-running the skill after a partial run, or running it against a repo where the lockfile is already absent, won't fail here.
 
 ### Direct vulnerabilities (`directDependency: true`)
 
@@ -267,25 +271,13 @@ Workflow for each transitive CVE:
 1. Run `npm ls <vulnerable-package>` to list every direct parent that pulls it in.
 2. For each parent, check whether a newer version ships with the patched transitive (via `npm view <parent> versions --json`, release notes, or the parent's own `package.json`).
 3. **If a parent upgrade resolves it** → bump the parent in root `dependencies` / `devDependencies` (same rules as direct vulns — root first, then libs if the parent isn't in root). Re-run `npm ls <vulnerable-package>` after `npm install` to confirm.
-4. **If no parent upgrade resolves it** (parent hasn't released a fix, or the vulnerable dep is pulled in by an unmaintained package) → handle based on mode:
+4. **If no parent upgrade resolves it** (parent hasn't released a fix, or the vulnerable dep is pulled in by an unmaintained package) → **add an `overrides` entry automatically** in both interactive and auto modes. Never ask the user; never leave the CVE unfixed. For each override applied, record the following in memory for the PR body (Step 8):
+   - The CVE ID, package, and fix version forced.
+   - The direct parent(s) that pulled the vulnerable transitive in, and why a parent upgrade was not possible (e.g. "axios@1.6.0 still pins follow-redirects@1.14.0", "parent `foo` is unmaintained, last release 2021").
+   - The risk of **not** overriding: the CVE remains open, `npm audit` / Mend gates keep failing, and the vulnerable code stays in `node_modules` until an upstream parent ships a fix (which may take weeks or never come).
+   - The risk of **adding** the override: it forces every consumer of `<package>` onto `<fix-version>`, even ones not tested against it — a sibling dep could break at runtime if it relies on older behavior. Reviewers must verify sibling consumers.
 
-   **Auto mode (`--overrides=<value>`):**
-   - `--overrides=skip` → do **not** add an `overrides` entry. Leave the CVE unfixed and list it in the PR body under "Needs manual review — add `overrides` entry?" with the parent list and fix version, so a human can decide.
-   - `--overrides=auto` → add the `overrides` entry without prompting. Include a clear warning in the PR body: "Override added for `<package>` — please verify sibling consumers still work, since this forces the whole tree onto `<fix-version>`."
-
-   **Interactive mode:** stop and ask the user before touching `overrides`:
-
-   > "I can't fix `<package>@<version>` (CVE-XXXX-YYYY) by upgrading its parent(s) `<parent-list>` — no released version of them pulls in a patched `<package>`. The only remaining option is an `overrides` entry in `package.json` that forces `<package>` to `<fix-version>` across the whole tree.
-   >
-   > **Why this is needed:** without it, the vulnerable version stays in `node_modules` and Mend keeps flagging the CVE; `npm audit` / security gates will continue to fail.
-   >
-   > **Risk of adding the override:** it forces every consumer of `<package>` onto `<fix-version>`, even ones that haven't been tested against it — a sibling dep could break at runtime if it relies on older behavior.
-   >
-   > **Risk of not adding it:** the CVE remains open until an upstream parent releases a fix, which may take weeks or never come.
-   >
-   > Do you want me to add the `overrides` entry?"
-
-   Only add the entry after the user confirms (interactive) or `--overrides=auto` (auto):
+   Add the entry:
 
    ```jsonc
    "overrides": {
@@ -426,18 +418,24 @@ Then show `git status` so the user (or the workflow log) can confirm what's stag
 git status
 ```
 
-Build the **PR summary** — list every CVE fixed with package, version bump, and fix type, plus any CVEs that were not fixable:
+Build the **PR summary** — list every CVE fixed with package, version bump, and fix type, plus any CVEs that were not fixable. Every CVE patched via an `overrides` entry must get its own dedicated subsection so reviewers can immediately see what was forced and why.
 
 ```
 Fix Mend vulnerabilities:
 - CVE-2023-26159 | follow-redirects 1.14.0 → >=1.15.4 | transitive (via axios parent upgrade)
 - CVE-2023-45857 | axios 1.3.0 → ^1.6.0 | direct
 
+Overrides applied (no parent upgrade resolves the transitive — please verify sibling consumers):
+- CVE-2024-XXXXX | follow-redirects 1.14.0 → ^1.15.4
+  - Pulled in via: request@2.88.2 (unmaintained, last release 2020 — no patched version exists)
+  - Why required: without the override the vulnerable version stays in node_modules, Mend keeps flagging the CVE, and npm audit / security gates continue to fail
+  - Risk of override: every consumer of follow-redirects is forced onto ^1.15.4; sibling deps that relied on older behavior may break at runtime — please smoke-test request-based call sites
+
 Not fixed (included for visibility):
 - CVE-XXXX-YYYY | foo | no patch available
 ```
 
-Call out explicitly any CVE that was fixed via `overrides` (with the reason the parent upgrade was not possible), so reviewers know to test sibling consumers. In auto mode with `--overrides=skip`, also include a "Needs manual review — add `overrides`?" section listing the CVEs that were left unfixed because no parent upgrade resolved them.
+The "Overrides applied" section must be present (even if just one entry) whenever any `overrides` entry was added during the run. If no overrides were needed, omit the section entirely.
 
 ### Interactive mode
 
@@ -445,7 +443,7 @@ Call out explicitly any CVE that was fixed via `overrides` (with the reason the 
 
 ### Auto mode
 
-If invoked with `--jira / --scope / --overrides` flags, finish the run by committing and opening a draft PR:
+If invoked with `--jira / --scope` flags, finish the run by committing and opening a draft PR:
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -461,10 +459,10 @@ gh pr create --draft \
   --base main \
   --title "fix(mend): patch security vulnerabilities" \
   --body "$(cat <<'EOF'
-<paste the PR summary here, including any "Needs manual review" / overrides warnings>
+<paste the PR summary here, including any "Overrides applied" warnings>
 
 ---
-Generated automatically by `.github/workflows/mend-fix.yml`. Review the dependency bumps and the build/test output before marking ready for review.
+Generated automatically by `.github/workflows/mend-agent.yaml`. Review the dependency bumps and the build/test output before marking ready for review.
 EOF
 )"
 ```
