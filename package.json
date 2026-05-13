@@ -1,8 +1,16 @@
- {                                                                                                                                                                                      
-    "name": "mend-sandbox",
-    "version": "0.0.1",
-    "private": true,
-    "dependencies": {
-      "lodash": "4.17.20"
-    }                                                                                                                                                                                    
+{
+  "name": "mend-sandbox",
+  "version": "0.0.1",
+  "private": true,
+  "dependencies": {
+    "lodash": "4.17.20",
+    "@opentelemetry/sdk-node": "^0.217.0",
+    "fast-xml-parser": "^5.7.3",
+    "express-rate-limit": "^8.5.1"
+  },
+  "overrides": {
+    "protobufjs": "^7.5.6",
+    "@protobufjs/utf8": "^1.1.1",
+    "basic-ftp": "^5.3.1"
   }
+}
