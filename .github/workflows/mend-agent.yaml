@@ -31,18 +31,6 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Notify Slack — agent started
-        if: vars.SANITY_TESTING_FAILURE_CHANNEL != ''
-        uses: slackapi/slack-github-action@v3.0.1
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "${{ vars.SANITY_TESTING_FAILURE_CHANNEL }}",
-              "text": "Mend agent (scheduled) started"
-            }
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
