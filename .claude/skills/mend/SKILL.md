@@ -3,7 +3,11 @@ name: mend
 description: Fetch Mend vulnerability alerts for this repo, analyze direct vs transitive deps, list fixable/non-fixable, apply fixes, run build + tests, and stage all changes for the user to raise a PR
 ---
 
-You are fixing Mend (WhiteSource) security vulnerabilities for the `scriptless-mobile-backend` Node.js repo.
+## Overview
+
+You are fixing Mend (WhiteSource) security vulnerabilities for the `scriptless-mobile-backend` Node.js repo. The skill fetches alerts from the Mend API, triages by severity, applies fixes (direct bumps, parent upgrades, or `overrides` for unresolvable transitives), runs build + tests, and stages changes for a PR.
+
+The skill runs in **interactive mode** by default (prompts the user for Jira ticket + scope) or in **auto mode** when invoked with `--jira` / `--scope` flags from CI (e.g. the scheduled / `workflow_dispatch` GitHub Actions workflow at `.github/workflows/mend-agent.yaml`, which shells out to `scripts/mend-agent.mjs`). See [Mode behavior](#mode-behavior-interactive-vs-auto) below.
 
 ## Execution rules
 
@@ -14,9 +18,17 @@ You are fixing Mend (WhiteSource) security vulnerabilities for the `scriptless-m
 - Transitive CVEs that no parent upgrade can resolve are fixed automatically by adding an `overrides` entry — **never ask the user**. Each override is recorded in the PR body with the reason it was required and the risk of skipping it (see Step 6 and Step 8).
 - Everything else runs end-to-end autonomously from Step 1 through Step 8.
 
-## Auto mode (CI / scheduled runs)
+## Mode behavior (interactive vs auto)
 
-When this skill is invoked with arguments of the form `--jira=<value> --scope=<value>` (for example, from the scheduled / `workflow_dispatch` GitHub Actions workflow at `.github/workflows/mend-agent.yaml`, which shells out to `scripts/mend-agent.mjs`), it must run **fully unattended** — both prompts are answered by the flags and the skill must complete by opening a draft PR.
+The skill behaves differently in three steps depending on how it was invoked. At-a-glance:
+
+| Step | Interactive (default)             | Auto (with `--jira` / `--scope`)              |
+| ---- | --------------------------------- | --------------------------------------------- |
+| 1    | Prompt the user for the Jira ID   | Use the `--jira=<value>` flag value           |
+| 5    | Prompt the user for the scope     | Use the `--scope=<value>` flag value          |
+| 8    | Stage only — user commits & PRs   | Commit, push, and run `gh pr create --draft`  |
+
+In auto mode the skill must run **fully unattended** — both prompts are answered by flags and the run must finish by opening a draft PR.
 
 Flag values:
 
@@ -24,8 +36,6 @@ Flag values:
 | --------- | ------------------------- | ------------------------------------------------------------------------------------------------- |
 | `--jira`  | `MOB-12345` or `none`     | Used in the branch name. `none` means "no Jira", same as the `no jira` reply in interactive mode. |
 | `--scope` | `all` or `critical+high`  | Step 5 — which severities to fix. Skip the user prompt entirely.                                  |
-
-In auto mode, **Step 8 changes**: instead of stopping after `git add`, the skill must commit the staged changes and run `gh pr create --draft` with the CVE summary as the PR body. See Step 8 for the auto-mode block.
 
 If either flag is missing while the other is present, treat it as a malformed invocation: stop and print the expected flag set. Do not fall back to interactive prompts in CI — they will hang the workflow.
 
@@ -68,13 +78,13 @@ print(c['saas-eu'].get('project_token', ''))
 
 If any variable is empty, stop and tell the user to populate `~/.mend/credentials`. The file must have a `[saas-eu]` section with `org_token`, `user_key`, `api_url`, `product_token`, and `project_token`. These can be found in the Mend web UI at **Integrate → Organization → API Key**, **Profile → User Keys**, and **Project → Project Vitals → Request Token** (for `project_token`).
 
-## Step 1 — Create a branch from main
+## Procedure
+
+### Step 1 — Create a branch from main
 
 Before fetching alerts or making any changes, create a dedicated branch off the latest `main` by invoking the `/git create-branch` workflow (see [.claude/commands/git.md](../../commands/git.md)).
 
-**Auto mode:** if `--jira=<value>` was passed, use it directly (no prompt). `--jira=none` means no Jira ticket.
-
-**Interactive mode:** ask the user — "What is the Jira ticket ID for this Mend fix? (e.g. MOB-12345) — reply `no jira` if there isn't one."
+Get the Jira ticket ID (see [Mode behavior](#mode-behavior-interactive-vs-auto)). The interactive prompt to the user is: "What is the Jira ticket ID for this Mend fix? (e.g. MOB-12345) — reply `no jira` if there isn't one."
 
 Then invoke the git create-branch subcommand with a `mend-vulnerabilities` description:
 - With Jira ticket: `/git create-branch MOB-XXXXX mend vulnerabilities` → branch like `<username>/mend-vulnerabilities/MOB-XXXXX`
@@ -82,7 +92,7 @@ Then invoke the git create-branch subcommand with a `mend-vulnerabilities` descr
 
 Confirm the branch is created, checked out, and pushed to origin before continuing to Step 2.
 
-## Step 2 — Fetch all vulnerability alerts
+### Step 2 — Fetch all vulnerability alerts
 
 Response can be 2 MB+. Save to a temp file and always open with `encoding="utf-8"`.
 
@@ -97,7 +107,7 @@ curl -s -X POST "$API_URL" \
 
 `TMPFILE` is exported so Step 3 reads from the same path. If you run Step 3 in a new shell, re-run the `export` line first.
 
-## Step 3 — Parse and triage
+### Step 3 — Parse and triage
 
 The API returns `"high"` for both critical and high. Derive critical from CVSS score >= 9.0.
 
@@ -164,7 +174,7 @@ for r in rows:
     print(f"{r['severity'].upper():8} | {r['package']:35} | {r['version']:12} | {dep_type:10} | {r['cve']} | {r['fix']}")
 ```
 
-## Step 4 — Analyze dependency chains and determine fix order
+### Step 4 — Analyze dependency chains and determine fix order
 
 For each vulnerability, run `npm ls <package>` to see the full dependency chain:
 
@@ -194,7 +204,7 @@ npm ls follow-redirects 2>/dev/null
 
 If all paths to a vulnerable transitive dep go through one direct dep, upgrading that direct dep may fix the transitive automatically — no `overrides` needed. Verify with `npm ls <transitive>` after the upgrade.
 
-## Step 5 — List fixable and non-fixable
+### Step 5 — List fixable and non-fixable
 
 Before making any changes, present a table:
 
@@ -212,23 +222,11 @@ NOT FIXABLE:
 | MEDIUM   | bar     | Requires major version bump (breaking API change) — needs dedicated effort |
 ```
 
-**Auto mode:** if `--scope=<value>` was passed (`all` or `critical+high`), use it directly and proceed to Step 6 without prompting.
-
-**Interactive mode:** STOP — USER INPUT REQUIRED. Print the question as its own visually distinct block so it does not get buried under the tables above:
-
-```
-════════════════════════════════════════════════════════════
->>> ACTION REQUIRED — PLEASE RESPOND <<<
-
-   Fix all fixable ones, or only critical and high?
-
-   Reply with:  "all"   OR   "critical+high"
-════════════════════════════════════════════════════════════
-```
+Get the scope (see [Mode behavior](#mode-behavior-interactive-vs-auto)). The interactive prompt to the user is: "Fix all fixable ones, or only critical and high? Reply with: `all` OR `critical+high`."
 
 Wait for the user's answer before touching any files.
 
-## Step 6 — Apply fixes
+### Step 6 — Apply fixes
 
 **Keep the user informed throughout this step.** Fixes, `npm install`, and verification can take several minutes — long silences make users think the process is stuck. Print a short one-line status message (a single sentence, no tables or bullets) before every meaningful action, so the user always knows what you're doing and that you're still working. Examples:
 
@@ -241,7 +239,7 @@ Wait for the user's answer before touching any files.
 
 Do this for every sub-step below (delete lock file, each package bump, each override, `npm install`, each `npm ls` verification). One line each — enough to confirm progress, not a full narration.
 
-### Before making any changes, delete package-lock.json
+#### Before making any changes, delete package-lock.json
 
 ```bash
 rm -f package-lock.json
@@ -249,7 +247,7 @@ rm -f package-lock.json
 
 `-f` keeps the step idempotent — re-running the skill after a partial run, or running it against a repo where the lockfile is already absent, won't fail here.
 
-### Direct vulnerabilities (`directDependency: true`)
+#### Direct vulnerabilities (`directDependency: true`)
 
 Bump the version range under `dependencies` or `devDependencies` in the **root `package.json` first** — root drives `package-lock.json` and is what actually gets installed. Use `^` (caret) unless the fix requires an exact version.
 
@@ -262,7 +260,7 @@ Bump the version range under `dependencies` or `devDependencies` in the **root `
 
 **If the package is not declared in root at all** (e.g. `express` lives only in `libs/auth`, `libs/otel`, `libs/logger`, `libs/nest-utils`), bump it in every lib that declares it *and* add it to root `dependencies` (or to root `overrides` if it should stay transitive) so the lock file actually resolves to the patched version. Otherwise the lib declaration changes but nothing installed changes.
 
-### Transitive vulnerabilities (`directDependency: false`)
+#### Transitive vulnerabilities (`directDependency: false`)
 
 **Prefer upgrading the direct parent in `dependencies` / `devDependencies` over editing `overrides`.** `overrides` pin a transitive version across the whole tree and can silently break sibling packages that expect the original version — they should be the last resort, not the default.
 
@@ -287,7 +285,7 @@ Workflow for each transitive CVE:
 
    Use `"npm:empty-npm-package@1.0.0"` only when certain the package is not used at runtime (build-time dev tooling only).
 
-### Sync the patched version across every `package.json` (and template) in the monorepo
+#### Sync the patched version across every `package.json` (and template) in the monorepo
 
 Root drives `package-lock.json`, but individual `libs/*/package.json`, `apps/**/package.json`, and **`package.json.ejs` templates** (which are rendered into real `package.json` files at script-generation time) declare their own runtime deps and will drift out of sync unless they are updated too. After every root bump (or lib bump, for the no-root-entry case above), align every other declaration of the same package to the **same range used in root**.
 
@@ -303,7 +301,7 @@ If you added an `overrides` entry in root, also add the same entry to any lib th
 
 There is only one `package-lock.json` (at root), so there is no lib-level lock file to regenerate.
 
-### Regenerate package-lock.json
+#### Regenerate package-lock.json
 
 ```bash
 npm install
@@ -315,54 +313,19 @@ Verify the patched versions are installed:
 npm ls <package-name>
 ```
 
-### Adapt call sites to breaking API changes (major version bumps)
+#### Adapt call sites to breaking API changes (major version bumps)
 
-After a **major** version bump (`x.y.z` → `(x+1).0.0`), the new release often changes the package's public surface. Check these proactively **before** Step 7 — proactive rewrites are cheaper than failure-driven diagnosis, and they keep tests honest (a test passing because nothing imports the bumped code is not a green light).
+After any major version bump (`x.y.z` → `(x+1).0.0`), the new release often changes the package's public surface. Run through the [Major Version Bump Checklist](#major-version-bump-checklist) under Reference before Step 7 — proactive rewrites are cheaper than failure-driven diagnosis, and they keep tests honest (a test passing because nothing imports the bumped code is not a green light).
 
-#### 1. Import shape changes (default vs named export)
-
-Major bumps frequently drop or reshape default exports. Examples:
-- `uuid` v3 → v7+: `import uuid from 'uuid'` becomes `import { v4 } from 'uuid'`.
-- `chalk` v4 → v5: default-exported function becomes a named-exports module.
-- `node-fetch` v2 → v3: CJS default becomes ESM named exports.
-
-For every major-bumped package, find every import in the codebase:
+If the checklist resulted in any edit to `package.json` (root, libs, apps, or `.ejs` templates) — most commonly a revert/downgrade of a bump that turned out to need real logic rewrite, or adding a shim/polyfill dependency — the lock file is now stale. Regenerate it before Step 7:
 
 ```bash
-git grep -nE "(from|require\\()[ ]*['\"]<pkg>['\"]" -- ':!node_modules' ':!package-lock.json'
+git diff --name-only | grep -E '(^|/)package\.json(\.ejs)?$' && npm install
 ```
 
-Cross-check each match against the new release's exports — read `node_modules/<pkg>/package.json` (`exports` field) and the package's `*.d.ts` or migration guide. **Do not guess the shape; read it.** Rewrite imports to match.
+Skip this if no `package.json` changed during the checklist — re-running `npm install` against an unchanged tree is wasted CI time but otherwise harmless.
 
-#### 2. API signature changes (arity, positional → named, sync → async)
-
-A function may keep its name but change its parameter list — `func(a, b, c)` becomes `func(a, b)` or `func(a, { b, c })`. The TypeScript compiler is the cheapest way to find every mismatched call site at once:
-
-```bash
-npx tsc --noEmit
-```
-
-For each error, look at the new signature in `node_modules/<pkg>/**/*.d.ts` (or the migration guide) and update the call site. Patterns to watch for:
-- Positional args collapsed into an options bag: `fn(a, b, c)` → `fn(a, { b, c })`.
-- Callback replaced by a Promise: `fn(arg, cb)` → `const result = await fn(arg)`.
-- A required arg became optional, or vice versa.
-- The return shape changed (e.g. an array became an object with `data`/`meta` fields).
-
-Only escalate to "not fixable (breaking change)" if the new signature requires real logic rewrite — the function was split into two, the return type ripples through many call sites with different semantics, etc. Mechanical updates (renamed import, reordered args, awaited Promise) are part of the fix; they should be applied silently and noted in the PR body, not used as a reason to revert the bump.
-
-#### Reconcile `package-lock.json` if this step changed any `package.json`
-
-The earlier `npm install` (under "Regenerate package-lock.json") had to run before this step so `node_modules` and `*.d.ts` were available for `tsc` and `git grep`. But if the call-site adapt above resulted in **any** edit to `package.json` — most commonly a revert/downgrade of a bump that turned out to need real logic rewrite, or adding a shim/polyfill dependency — the lock file is now stale and Step 7 will build/test against an inconsistent dep tree.
-
-Run `git diff --name-only` and check if any `package.json` (root, libs, apps, or `.ejs` templates) appears in the output **after** call-site adapt. If yes, regenerate the lock file once more before Step 7:
-
-```bash
-git diff --name-only | grep -E '(^|/)package\\.json(\\.ejs)?$' && npm install
-```
-
-Skip this if no `package.json` changed during adapt — re-running `npm install` against an unchanged tree is wasted CI time but otherwise harmless.
-
-## Step 7 — Build and test
+### Step 7 — Build and test
 
 Both must pass before staging changes.
 
@@ -376,33 +339,9 @@ npx nx run-many -t test
 
 If a build or test fails, diagnose the root cause before proceeding. A failing test may indicate a breaking change in the upgraded package — revert that specific fix and mark it as "not fixable (breaking change)" in the summary.
 
-### ESM-only upgrades (Jest `SyntaxError: Cannot use import statement outside a module`)
+If Jest fails with `SyntaxError: Cannot use import statement outside a module` or `SyntaxError: Unexpected token 'export'` originating in `node_modules/<pkg>/...`, this is an ESM-only release hitting Jest in CJS mode — see [ESM-only packages and Jest](#esm-only-packages-and-jest) under Reference. **Do not revert the bump.**
 
-Many major bumps in 2024+ ship ESM-only releases (e.g. `uuid` v14, `node-fetch` v3, `chalk` v5). Jest in CJS mode chokes on them with `SyntaxError: Cannot use import statement outside a module` or `SyntaxError: Unexpected token 'export'` originating in `node_modules/<package>/...`. **This is not a breaking change — do not revert the bump.** Instead, add the package to `transformIgnorePatterns` in `jest.preset.js` so Jest transforms it through Babel:
-
-```js
-// jest.preset.js — before
-module.exports = {
-  ...nxPreset,
-  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')]
-};
-
-// jest.preset.js — after (uuid added to the not-ignored list)
-module.exports = {
-  ...nxPreset,
-  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')],
-  transformIgnorePatterns: [
-    ...(nxPreset.transformIgnorePatterns || []),
-    'node_modules/(?!(uuid)/)'
-  ]
-};
-```
-
-If `transformIgnorePatterns` already exists with another package (e.g. `'node_modules/(?!(node-fetch)/)'`), extend the alternation rather than replacing it: `'node_modules/(?!(node-fetch|uuid)/)'`.
-
-Re-run `npx nx run-many -t test` to confirm. Only revert the bump and mark "not fixable" if tests still fail after the Jest config fix — that would indicate a real API breaking change, not an ESM-loader issue.
-
-## Step 8 — Stage all changes (and, in auto mode, open a draft PR)
+### Step 8 — Stage all changes
 
 Stage every file that was modified as part of the fix. In a monorepo fix this typically includes root `package.json`, root `package-lock.json`, and any `libs/*/package.json` or `apps/*/package.json` that were touched during the sync sub-step, plus any follow-on code changes:
 
@@ -418,32 +357,30 @@ Then show `git status` so the user (or the workflow log) can confirm what's stag
 git status
 ```
 
-Build the **PR summary** — list every CVE fixed with package, version bump, and fix type, plus any CVEs that were not fixable. Every CVE patched via an `overrides` entry must get its own dedicated subsection so reviewers can immediately see what was forced and why.
+Build the **PR summary** — list every CVE fixed with severity, package, version bump, and fix type, plus any CVEs that were not fixable. Every CVE patched via an `overrides` entry must get its own dedicated subsection so reviewers can immediately see what was forced and why. Severity column uses the same labels as Step 3 (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW`) so reviewers can scan blast radius at a glance.
 
 ```
 Fix Mend vulnerabilities:
-- CVE-2023-26159 | follow-redirects 1.14.0 → >=1.15.4 | transitive (via axios parent upgrade)
-- CVE-2023-45857 | axios 1.3.0 → ^1.6.0 | direct
+- CRITICAL | CVE-2023-26159 | follow-redirects 1.14.0 → >=1.15.4 | transitive (via axios parent upgrade)
+- HIGH     | CVE-2023-45857 | axios 1.3.0 → ^1.6.0 | direct
 
 Overrides applied (no parent upgrade resolves the transitive — please verify sibling consumers):
-- CVE-2024-XXXXX | follow-redirects 1.14.0 → ^1.15.4
+- CRITICAL | CVE-2024-XXXXX | follow-redirects 1.14.0 → ^1.15.4
   - Pulled in via: request@2.88.2 (unmaintained, last release 2020 — no patched version exists)
   - Why required: without the override the vulnerable version stays in node_modules, Mend keeps flagging the CVE, and npm audit / security gates continue to fail
   - Risk of override: every consumer of follow-redirects is forced onto ^1.15.4; sibling deps that relied on older behavior may break at runtime — please smoke-test request-based call sites
 
 Not fixed (included for visibility):
-- CVE-XXXX-YYYY | foo | no patch available
+- MEDIUM   | CVE-XXXX-YYYY | foo | no patch available
 ```
 
 The "Overrides applied" section must be present (even if just one entry) whenever any `overrides` entry was added during the run. If no overrides were needed, omit the section entirely.
 
-### Interactive mode
+Finish the run per [Mode behavior](#mode-behavior-interactive-vs-auto):
 
-**Do NOT create a commit and do NOT create a PR.** Stop here — print the summary above for the user to paste into their PR description. The user will commit and raise the PR on their own.
+**Interactive** — stop here. Do NOT create a commit and do NOT create a PR. Print the summary above for the user to paste into their PR description.
 
-### Auto mode
-
-If invoked with `--jira / --scope` flags, finish the run by committing and opening a draft PR:
+**Auto** — commit, push, and open a draft PR:
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -471,7 +408,74 @@ If the Jira flag was a real ticket (not `none`), include it in the PR title: `fi
 
 If `gh pr create` fails with a permissions error ("GitHub Actions is not permitted to create or approve pull requests"), the repo's "Allow Actions to create PRs" setting is off — the workflow needs a `PR_TOKEN` PAT secret. Print the error and exit non-zero so the workflow run fails visibly.
 
-## Pitfalls and lessons learned
+## Reference
+
+### Major version bump checklist
+
+For each package crossing a major boundary (`x.y.z` → `(x+1).0.0`), run these three checks before Step 7. Mechanical updates (renamed import, reordered args, awaited Promise) are part of the fix; they should be applied silently and noted in the PR body. Only escalate to "not fixable (breaking change)" if the new signature requires real logic rewrite — the function was split into two, the return type ripples through many call sites with different semantics, etc.
+
+#### 1. Fetch migration notes via context7 (cheap upfront signal)
+
+Before grepping imports or running `tsc`, fetch the package's docs via the context7 MCP (`mcp__context7__resolve-library-id` → `mcp__context7__query-docs` with a query like `"breaking changes v<old> to v<new>"`) so the greps in checks 2 and 3 are targeted. context7 is a heuristic — `*.d.ts` and `tsc --noEmit` below remain the source of truth for the actually-installed version. Skip if context7 has no entry, or if the bump is minor/patch.
+
+#### 2. Import shape changes (default vs named export)
+
+Major bumps frequently drop or reshape default exports. Examples:
+- `uuid` v3 → v7+: `import uuid from 'uuid'` becomes `import { v4 } from 'uuid'`.
+- `chalk` v4 → v5: default-exported function becomes a named-exports module.
+- `node-fetch` v2 → v3: CJS default becomes ESM named exports.
+
+For every major-bumped package, find every import in the codebase:
+
+```bash
+git grep -nE "(from|require\()[ ]*['\"]<pkg>['\"]" -- ':!node_modules' ':!package-lock.json'
+```
+
+Cross-check each match against the new release's exports — read `node_modules/<pkg>/package.json` (`exports` field) and the package's `*.d.ts` or migration guide (from context7 in check 1). **Do not guess the shape; read it.** Rewrite imports to match.
+
+#### 3. API signature changes (arity, positional → named, sync → async)
+
+A function may keep its name but change its parameter list — `func(a, b, c)` becomes `func(a, b)` or `func(a, { b, c })`. The TypeScript compiler is the cheapest way to find every mismatched call site at once:
+
+```bash
+npx tsc --noEmit
+```
+
+For each error, look at the new signature in `node_modules/<pkg>/**/*.d.ts` (or the migration guide from context7) and update the call site. Patterns to watch for:
+- Positional args collapsed into an options bag: `fn(a, b, c)` → `fn(a, { b, c })`.
+- Callback replaced by a Promise: `fn(arg, cb)` → `const result = await fn(arg)`.
+- A required arg became optional, or vice versa.
+- The return shape changed (e.g. an array became an object with `data`/`meta` fields).
+
+### ESM-only packages and Jest
+
+**Symptom:** Jest fails with `SyntaxError: Cannot use import statement outside a module` or `SyntaxError: Unexpected token 'export'` originating in `node_modules/<package>/...`.
+
+Many major bumps in 2024+ ship ESM-only releases (e.g. `uuid` v14, `node-fetch` v3, `chalk` v5). Jest in CJS mode chokes on them. **This is not a breaking change — do not revert the bump.** Instead, add the package to `transformIgnorePatterns` in `jest.preset.js` so Jest transforms it through Babel:
+
+```js
+// jest.preset.js — before
+module.exports = {
+  ...nxPreset,
+  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')]
+};
+
+// jest.preset.js — after (uuid added to the not-ignored list)
+module.exports = {
+  ...nxPreset,
+  roots: ['<rootDir>', path.resolve(__dirname, './__mocks__')],
+  transformIgnorePatterns: [
+    ...(nxPreset.transformIgnorePatterns || []),
+    'node_modules/(?!(uuid)/)'
+  ]
+};
+```
+
+If `transformIgnorePatterns` already exists with another package (e.g. `'node_modules/(?!(node-fetch)/)'`), extend the alternation rather than replacing it: `'node_modules/(?!(node-fetch|uuid)/)'`.
+
+Re-run `npx nx run-many -t test` to confirm. Only revert the bump and mark "not fixable" if tests still fail after the Jest config fix — that would indicate a real API breaking change, not an ESM-loader issue.
+
+### Pitfalls and lessons learned
 
 Non-obvious gotchas the skill has hit before. Skim this list when something looks wrong mid-run — the fix is probably already documented in the referenced step.
 
@@ -480,11 +484,11 @@ Non-obvious gotchas the skill has hit before. Skim this list when something look
 - **Lib `package.json` drifts from root.** Root drives `package-lock.json`; if a package is only declared in `libs/*`, edits to the lib won't change what's installed. Bump in every lib *and* add to root — see Step 6 ("Direct vulnerabilities").
 - **`.ejs` package templates are easy to miss.** `apps/*/package.json` globs skip nested files like `apps/script-generator/src/assets/templates/package.json.ejs`. Use `git ls-files '*package.json' '*package.json.ejs'` — see Step 6 ("Sync the patched version").
 - **`overrides` can silently break sibling consumers.** Always try a parent upgrade first; only fall back to `overrides` when no parent release resolves the CVE — see Step 6 ("Transitive vulnerabilities").
-- **Jest `SyntaxError: Cannot use import statement outside a module` is *not* a breaking change.** It's an ESM-only release hitting Jest in CJS mode. Add the package to `transformIgnorePatterns` in `jest.preset.js` — see Step 7. Do not revert the bump.
-- **Call-site adapt can re-stale the lock file.** If a major-version adapt edits any `package.json` (revert/downgrade, shim added), re-run `npm install` before Step 7 — see Step 6 ("Reconcile `package-lock.json`").
+- **Jest `SyntaxError: Cannot use import statement outside a module` is *not* a breaking change.** It's an ESM-only release hitting Jest in CJS mode. Add the package to `transformIgnorePatterns` in `jest.preset.js` — see [ESM-only packages and Jest](#esm-only-packages-and-jest). Do not revert the bump.
+- **Call-site adapt can re-stale the lock file.** If the Major Version Bump Checklist edits any `package.json` (revert/downgrade, shim added), re-run `npm install` before Step 7 — see Step 6 ("Adapt call sites to breaking API changes").
 - **Always list "not fixed" CVEs in the PR body.** Reviewers need the complete picture, including the ones blocked on upstream — see Step 5 / Step 8.
 
-## Error handling
+### Error handling
 
 | Error                                | Action                                                                                     |
 | ------------------------------------ | ------------------------------------------------------------------------------------------ |
